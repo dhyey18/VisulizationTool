@@ -1,0 +1,99 @@
+/* ============================================================
+   Examples Modal — Extended Styles
+   ============================================================ */
+
+.examples-modal {
+    max-height: 86vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.modal-subtitle {
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    margin-top: 3px;
+    font-weight: 400;
+}
+
+/* ── Search ── */
+.examples-search {
+    position: relative;
+    display: flex;
+    align-items: center;
+    margin-bottom: var(--sp-4);
+    flex-shrink: 0;
+}
+
+.search-icon {
+    position: absolute;
+    left: var(--sp-3);
+    color: var(--text-muted);
+    pointer-events: none;
+    flex-shrink: 0;
+}
+
+.search-input {
+    width: 100%;
+    padding: var(--sp-2) var(--sp-3) var(--sp-2) calc(var(--sp-3) + 22px);
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: var(--text-base);
+    font-family: var(--font-sans);
+    outline: none;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.search-input:focus {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px var(--accent-callstack-soft);
+}
+
+.search-input::placeholder {
+    color: var(--text-dim);
+}
+
+.search-clear {
+    position: absolute;
+    right: var(--sp-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: none;
+    background: var(--bg-card);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.search-clear:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+/* ── Scrollable grid ── */
+.examples-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-5);
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+    padding-right: 4px;
+    /* add some breathing room for scrollbar */
+}
+
+/* ── Empty state ── */
+.examples-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--sp-8) var(--sp-4);
+    color: var(--text-muted);
+    font-size: var(--text-base);
+    font-style: italic;
+}

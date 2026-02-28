@@ -36,6 +36,10 @@ interface PendingCallback {
   scope: Scope;
   name: string;
   thisVal: RuntimeValue;
+  /** Arguments to pass into the callback (e.g. Promise resolved value for .then) */
+  args?: RuntimeValue[];
+  /** heapId of the chained promise, so the return value can be forwarded to the next .then */
+  chainedPromiseHeapId?: string;
 }
 
 export class Interpreter {
@@ -45,6 +49,8 @@ export class Interpreter {
   private currentScope: Scope;
   private globalScope: Scope;
   private maxSteps = 2000;
+  private maxCallDepth = 50;
+  private currentCallDepth = 0;
   private pendingTimerCallbacks: Map<string, PendingCallback> = new Map();
   private pendingMicrotaskCallbacks: Map<string, PendingCallback> = new Map();
 
@@ -57,6 +63,7 @@ export class Interpreter {
     resetUid();
     this.steps = [];
     this.stepId = 0;
+    this.currentCallDepth = 0;
     this.runtime = new RuntimeEnvironment();
     this.globalScope = new Scope('global');
     this.currentScope = this.globalScope;
@@ -141,12 +148,21 @@ export class Interpreter {
   private hoistFunction(node: ASTNode) {
     const name = node.id.name;
     const heapId = uid('fn');
+    // Allocate the base heap object
     this.runtime.heap.alloc({
       id: heapId,
       type: 'function',
       label: `fn ${name}`,
       properties: {},
     });
+    // Attach _node (the full AST) and _closureScope so invokeFunction can
+    // find and execute the function body. Without this, invokeFunction returns
+    // UNDEFINED_VAL immediately because fnNode is undefined.
+    const stored = this.runtime.heap.get(heapId);
+    if (stored) {
+      (stored as unknown as Record<string, unknown>)['_node'] = node;
+      (stored as unknown as Record<string, unknown>)['_closureScope'] = this.currentScope;
+    }
     const fnVal: RuntimeValue = { type: 'function', name, heapId };
     this.currentScope.define(name, fnVal);
   }
@@ -526,6 +542,14 @@ export class Interpreter {
     const fnNode = (heapObj as unknown as { _node?: ASTNode })._node;
     if (!fnNode) return UNDEFINED_VAL;
 
+    // Guard against infinite / too-deep recursion
+    this.currentCallDepth++;
+    if (this.currentCallDepth > this.maxCallDepth) {
+      this.currentCallDepth--;
+      this.emit('program_end', `Stack overflow: ${name}() — maximum call depth (${this.maxCallDepth}) exceeded`, line, 'callStack');
+      return UNDEFINED_VAL;
+    }
+
     // Push new frame
     const frame: StackFrame = {
       id: uid('frame'),
@@ -550,6 +574,7 @@ export class Interpreter {
     }
 
     let returnValue: RuntimeValue = UNDEFINED_VAL;
+    let hadExplicitReturn = false;
     try {
       const body = fnNode.body;
       if (body.type === 'BlockStatement') {
@@ -557,20 +582,28 @@ export class Interpreter {
           this.execute(stmt);
         }
       } else {
-        // Arrow function with expression body
+        // Arrow function with expression body — implicit return
         returnValue = this.evaluate(body);
+        hadExplicitReturn = true; // treat expression body as an explicit return
         this.emit('function_return', `Return ${formatValue(returnValue)}`, this.getLine(body), 'callStack');
       }
     } catch (e: unknown) {
       if (e instanceof Error && e.message === '__RETURN__') {
         returnValue = (e as unknown as { returnValue: RuntimeValue }).returnValue;
+        hadExplicitReturn = true;
+        // execReturn already emitted a 'function_return' step — no duplicate needed
       } else {
         throw e;
       }
     } finally {
       this.currentScope = prevScope;
+      this.currentCallDepth--;
       this.runtime.callStack.pop();
-      this.emit('function_return', `${name}() returned ${formatValue(returnValue)}`, line, 'callStack');
+      // Only emit the implicit/fallthrough return step when there was no explicit 'return' statement
+      // (execReturn already emits its own step for explicit returns)
+      if (!hadExplicitReturn) {
+        this.emit('function_return', `${name}() returned ${formatValue(returnValue)}`, line, 'callStack');
+      }
     }
 
     return returnValue;
@@ -678,26 +711,49 @@ export class Interpreter {
   }
 
   private handleThen(node: ASTNode): RuntimeValue {
-    // Evaluate the object first (the promise)
+    // Evaluate the upstream promise
     const promiseVal = this.evaluate(node.callee.object);
 
-    // Evaluate the callback
-    const args = node.arguments as ASTNode[];
-    const callbackNode = args[0];
+    // Get the callback node
+    const thenArgs = node.arguments as ASTNode[];
+    const callbackNode = thenArgs[0];
     if (!callbackNode) return promiseVal;
+
+    // Extract the resolved value from the upstream promise so we can pass it
+    // as the first argument to the .then() callback (fixes "undefined" param bug)
+    let resolvedValue: RuntimeValue = UNDEFINED_VAL;
+    if (promiseVal.type === 'reference') {
+      const upstreamObj = this.runtime.heap.get(promiseVal.heapId);
+      if (upstreamObj?.promiseValue) {
+        resolvedValue = upstreamObj.promiseValue;
+      }
+    }
 
     const callbackName = this.getCalleeName(callbackNode) || 'then callback';
     const taskId = uid('microtask');
 
-    // Store callback for event loop processing
+    // Create a new chained promise in the heap for this .then() link.
+    // When the callback executes, we'll store its return value here so the
+    // NEXT .then() in the chain can access it.
+    const chainedHeapId = uid('promise');
+    this.runtime.heap.alloc({
+      id: chainedHeapId,
+      type: 'promise',
+      label: '.then promise',
+      properties: {},
+      promiseState: 'pending',
+    });
+
+    // Store callback with the resolved value and the chained promise id
     this.pendingMicrotaskCallbacks.set(taskId, {
       node: callbackNode,
       scope: this.currentScope,
       name: callbackName,
       thisVal: UNDEFINED_VAL,
+      args: [resolvedValue],
+      chainedPromiseHeapId: chainedHeapId,
     });
 
-    // If promise is already resolved, queue microtask
     const task: QueuedTask = {
       id: taskId,
       label: `.then(${callbackName})`,
@@ -708,14 +764,15 @@ export class Interpreter {
 
     this.emit(
       'queue_microtask',
-      `.then(${callbackName}) → queued as microtask`,
+      `.then(${callbackName}) → queued as microtask (receives: ${formatValue(resolvedValue)})`,
       this.getLine(node),
       'microtaskQueue',
       taskId,
     );
 
-    // Return the promise chain (same reference for simplicity)
-    return promiseVal;
+    // Return a reference to the chained promise so subsequent .then() calls
+    // (or variable assignments) resolve against the right heap object
+    return { type: 'reference', heapId: chainedHeapId, label: 'Promise<pending>' };
   }
 
   private evalNew(node: ASTNode): RuntimeValue {
@@ -975,30 +1032,57 @@ export class Interpreter {
     const prevScope = this.currentScope;
     this.currentScope = new Scope('function', cb.scope);
 
+    // Bind callback parameters to supplied args (e.g. Promise resolved value)
+    const cbArgs = cb.args ?? [];
+    const node = cb.node;
+    if (node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression') {
+      const params = (node.params as ASTNode[]) ?? [];
+      for (let i = 0; i < params.length; i++) {
+        const pName = params[i].name ?? `arg${i}`;
+        this.currentScope.define(pName, cbArgs[i] ?? UNDEFINED_VAL);
+      }
+    }
+
+    let returnValue: RuntimeValue = UNDEFINED_VAL;
+    let hadExplicitReturn = false;
     try {
-      const node = cb.node;
       if (node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression') {
         if (node.body.type === 'BlockStatement') {
           for (const stmt of node.body.body as ASTNode[]) {
             this.execute(stmt);
           }
         } else {
-          this.evaluate(node.body);
+          returnValue = this.evaluate(node.body);
+          hadExplicitReturn = true;
         }
       } else if (node.type === 'Identifier') {
-        // The callback is a named function reference
+        // Named function reference — look it up and call with args
         const fnVal = cb.scope.get(node.name) ?? this.globalScope.get(node.name);
         if (fnVal.type === 'function') {
-          this.invokeFunction(fnVal.name, fnVal.heapId, [], this.getLine(node));
+          returnValue = this.invokeFunction(fnVal.name, fnVal.heapId, cbArgs, this.getLine(node));
+          hadExplicitReturn = true;
         }
       }
     } catch (e: unknown) {
-      if (!(e instanceof Error && e.message === '__RETURN__')) {
-        // swallow
+      if (e instanceof Error && e.message === '__RETURN__') {
+        returnValue = (e as unknown as { returnValue: RuntimeValue }).returnValue;
+        hadExplicitReturn = true;
       }
     } finally {
       this.currentScope = prevScope;
       this.runtime.callStack.pop();
+      if (!hadExplicitReturn) {
+        // no-op for implicit void callbacks
+      }
+      // Forward the callback's return value into the chained promise so the
+      // next .then() in the chain receives the correct value
+      if (cb.chainedPromiseHeapId) {
+        const chained = this.runtime.heap.get(cb.chainedPromiseHeapId);
+        if (chained) {
+          chained.promiseState = 'fulfilled';
+          chained.promiseValue = returnValue;
+        }
+      }
       this.emit('function_return', `${name} callback complete`, this.getLine(cb.node), 'callStack');
     }
   }

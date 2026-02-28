@@ -96,5 +96,5 @@ export interface CodeExample {
   title: string;
   description: string;
   code: string;
-  category: 'basics' | 'functions' | 'closures' | 'async' | 'promises' | 'event-loop';
+  category: 'basics' | 'functions' | 'closures' | 'async' | 'promises' | 'event-loop' | 'advanced-async' | 'objects' | 'arrays';
 }
