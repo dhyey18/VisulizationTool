@@ -1,0 +1,137 @@
+/* ============================================================
+   Code Editor
+   ============================================================ */
+.code-editor-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── Toolbar ── */
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--sp-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  flex-shrink: 0;
+  gap: var(--sp-2);
+  min-height: 46px;
+  transition: background var(--transition-slow), border-color var(--transition-slow);
+}
+
+.toolbar-left,
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* ── Run Button ── */
+.btn-run {
+  background: var(--accent-gradient);
+  border-color: rgba(99, 102, 241, 0.3);
+  color: white;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  box-shadow: 0 2px 14px var(--accent-callstack-glow), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  font-size: var(--text-base);
+  padding: 8px 18px;
+  border-radius: var(--radius-sm);
+}
+
+.btn-run:hover {
+  background: var(--accent-gradient-hover);
+  box-shadow: 0 6px 24px var(--accent-callstack-glow), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  border-color: rgba(99, 102, 241, 0.5);
+  color: white;
+  transform: translateY(-1px);
+}
+
+.btn-run:active {
+  transform: translateY(0) scale(0.97);
+}
+
+.btn-run-pulse {
+  animation: btn-pulse 2.5s ease-in-out infinite;
+}
+
+@keyframes btn-pulse {
+
+  0%,
+  100% {
+    box-shadow: 0 2px 14px var(--accent-callstack-glow), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  }
+
+  50% {
+    box-shadow: 0 4px 28px var(--accent-callstack-glow), 0 0 0 4px var(--accent-callstack-soft), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  }
+}
+
+/* ── Read-only Badge ── */
+.editor-readonly-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+
+.readonly-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-webapi);
+  box-shadow: 0 0 6px var(--accent-webapi-glow);
+  flex-shrink: 0;
+}
+
+/* ── Error bar ── */
+.editor-error {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--text-sm);
+  color: var(--accent-taskqueue);
+  background: var(--accent-taskqueue-soft);
+  border-bottom: 1px solid rgba(239, 68, 68, 0.15);
+  font-family: var(--font-mono);
+  animation: slide-in var(--transition-fast) ease;
+}
+
+/* ── Editor area ── */
+.editor-wrapper {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+/* Monaco line highlight */
+.highlighted-line {
+  background: rgba(129, 140, 248, 0.08) !important;
+  border-right: none !important;
+}
+
+[data-theme="light"] .highlighted-line {
+  background: rgba(91, 99, 232, 0.07) !important;
+}
+
+.highlighted-line-deco {
+  background: var(--accent-callstack) !important;
+  width: 3px !important;
+  margin-left: 3px;
+  border-radius: 2px;
+  box-shadow: 0 0 8px var(--accent-callstack-glow);
+}
