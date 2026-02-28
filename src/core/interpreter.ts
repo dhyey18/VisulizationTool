@@ -36,9 +36,11 @@ interface PendingCallback {
   scope: Scope;
   name: string;
   thisVal: RuntimeValue;
-  /** Arguments to pass into the callback (e.g. Promise resolved value for .then) */
+  /** Pre-resolved args to pass (used for simple Promise.resolve() .then chains) */
   args?: RuntimeValue[];
-  /** heapId of the chained promise, so the return value can be forwarded to the next .then */
+  /** heapId of the upstream promise — read promiseValue lazily at execution time */
+  upstreamPromiseHeapId?: string;
+  /** heapId of the chained promise this callback fulfills, so next .then() gets the return value */
   chainedPromiseHeapId?: string;
 }
 
@@ -512,9 +514,16 @@ export class Interpreter {
       return this.handleThen(node);
     }
 
-    // Handle new Promise(...)
-    if (node.type === 'NewExpression') {
-      return this.evalNew(node);
+    // Handle resolve/reject calls inside new Promise executors
+    if (node.callee.type === 'Identifier') {
+      const callee = node.callee;
+      const fnVal = this.currentScope.get(callee.name);
+      if (fnVal.type === 'function') {
+        const heapObj = this.runtime.heap.get(fnVal.heapId);
+        if (heapObj && (heapObj as unknown as Record<string, unknown>)['_isResolve']) {
+          return this.handleResolveCall(node, fnVal.heapId);
+        }
+      }
     }
 
     // Regular function call
@@ -528,6 +537,34 @@ export class Interpreter {
     }
 
     return this.invokeFunction(fnVal.name, fnVal.heapId, args, this.getLine(node));
+  }
+
+  /** Intercept resolve(value) / reject(reason) inside new Promise executors */
+  private handleResolveCall(node: ASTNode, resolveHeapId: string): RuntimeValue {
+    const heapEntry = this.runtime.heap.get(resolveHeapId) as unknown as Record<string, unknown> | undefined;
+    const promiseHeapId = heapEntry?.['_promiseHeapId'] as string | undefined;
+    const isResolve = !!(heapEntry?.['_isResolve']);
+
+    const args = (node.arguments as ASTNode[]).map(a => this.evaluate(a));
+    const value = args[0] ?? UNDEFINED_VAL;
+
+    if (promiseHeapId) {
+      const promiseObj = this.runtime.heap.get(promiseHeapId);
+      if (promiseObj) {
+        promiseObj.promiseState = isResolve ? 'fulfilled' : 'rejected';
+        promiseObj.promiseValue = value;
+      }
+    }
+
+    this.emit(
+      isResolve ? 'promise_resolve' : 'promise_reject',
+      `${isResolve ? 'resolve' : 'reject'}(${formatValue(value)}) → promise settled`,
+      this.getLine(node),
+      'heap',
+      promiseHeapId,
+    );
+
+    return UNDEFINED_VAL;
   }
 
   private invokeFunction(
@@ -577,7 +614,14 @@ export class Interpreter {
     let hadExplicitReturn = false;
     try {
       const body = fnNode.body;
+      // Hoist inner FunctionDeclarations before executing the body
+      // (needed for closures with inner named functions like function increment() {...})
       if (body.type === 'BlockStatement') {
+        for (const stmt of body.body as ASTNode[]) {
+          if (stmt.type === 'FunctionDeclaration' && stmt.id) {
+            this.hoistFunction(stmt);
+          }
+        }
         for (const stmt of body.body as ASTNode[]) {
           this.execute(stmt);
         }
@@ -719,10 +763,14 @@ export class Interpreter {
     const callbackNode = thenArgs[0];
     if (!callbackNode) return promiseVal;
 
-    // Extract the resolved value from the upstream promise so we can pass it
-    // as the first argument to the .then() callback (fixes "undefined" param bug)
+    // Try to get the upstream promise's resolved value right now.
+    // For chained .then() the upstream promise may still be pending here
+    // (its callback hasn't run yet), so we also store the upstream heapId
+    // and resolve it lazily at execution time in executeCallback.
     let resolvedValue: RuntimeValue = UNDEFINED_VAL;
+    let upstreamHeapId: string | undefined;
     if (promiseVal.type === 'reference') {
+      upstreamHeapId = promiseVal.heapId;
       const upstreamObj = this.runtime.heap.get(promiseVal.heapId);
       if (upstreamObj?.promiseValue) {
         resolvedValue = upstreamObj.promiseValue;
@@ -744,13 +792,13 @@ export class Interpreter {
       promiseState: 'pending',
     });
 
-    // Store callback with the resolved value and the chained promise id
+    // Store callback with upstream promise id (for lazy resolution) and chained promise id
     this.pendingMicrotaskCallbacks.set(taskId, {
       node: callbackNode,
       scope: this.currentScope,
       name: callbackName,
       thisVal: UNDEFINED_VAL,
-      args: [resolvedValue],
+      upstreamPromiseHeapId: upstreamHeapId,
       chainedPromiseHeapId: chainedHeapId,
     });
 
@@ -762,9 +810,12 @@ export class Interpreter {
     };
     this.runtime.microtaskQueue.enqueue(task);
 
+    const descValue = upstreamHeapId
+      ? `from Promise<${formatValue(resolvedValue === UNDEFINED_VAL ? { type: 'string', value: 'pending...' } : resolvedValue)}>`
+      : formatValue(resolvedValue);
     this.emit(
       'queue_microtask',
-      `.then(${callbackName}) → queued as microtask (receives: ${formatValue(resolvedValue)})`,
+      `.then(${callbackName}) → queued as microtask ${descValue}`,
       this.getLine(node),
       'microtaskQueue',
       taskId,
@@ -1033,7 +1084,16 @@ export class Interpreter {
     this.currentScope = new Scope('function', cb.scope);
 
     // Bind callback parameters to supplied args (e.g. Promise resolved value)
-    const cbArgs = cb.args ?? [];
+    // For chained .then(), lazily read from the upstream promise now (at execution time,
+    // not at queue time, so the upstream callback will have already run and fulfilled it)
+    let cbArgs: RuntimeValue[];
+    if (cb.upstreamPromiseHeapId) {
+      const upstream = this.runtime.heap.get(cb.upstreamPromiseHeapId);
+      cbArgs = upstream?.promiseValue ? [upstream.promiseValue] : (cb.args ?? [UNDEFINED_VAL]);
+    } else {
+      cbArgs = cb.args ?? [];
+    }
+
     const node = cb.node;
     if (node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression') {
       const params = (node.params as ASTNode[]) ?? [];
